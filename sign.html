@@ -15,10 +15,7 @@
 		display: flex;
 		justify-content: center;
 	}
-	.card {
-		width: 100%;
-		max-width: 460px;
-	}
+	.card { width: 100%; max-width: 460px; }
 	h1 { font-size: 1.5rem; margin: 0 0 0.25rem; }
 	.sub { color: #999; margin: 0 0 1.5rem; font-size: 0.9rem; }
 	.privacy {
@@ -31,8 +28,9 @@
 		margin-bottom: 1.5rem;
 		line-height: 1.4;
 	}
+	.section-title { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: #6b7280; margin: 1.75rem 0 0; }
 	label { display: block; font-size: 0.85rem; margin: 1rem 0 0.35rem; color: #d1d5db; }
-	input[type=file], input[type=password] {
+	input[type=file], input[type=password], input[type=text] {
 		width: 100%;
 		box-sizing: border-box;
 		background: #111827;
@@ -65,30 +63,35 @@
 		max-height: 220px;
 		overflow-y: auto;
 	}
-	a.download {
+	a.install, button.cleanup, a.download {
 		display: block;
-		margin-top: 1.25rem;
+		margin-top: 1rem;
 		text-align: center;
 		padding: 0.85rem;
-		background: #16a34a;
-		color: #fff;
 		border-radius: 10px;
 		text-decoration: none;
 		font-weight: 600;
+		box-sizing: border-box;
 	}
+	a.install { background: #2563eb; color: #fff; }
+	a.download { background: #374151; color: #fff; }
+	button.cleanup { background: #b91c1c; color: #fff; }
+	.hint { font-size: 0.72rem; color: #6b7280; margin: 0.35rem 0 0; line-height: 1.4; }
 </style>
 </head>
 <body>
 <div class="card">
 	<h1>GOAT Sign</h1>
-	<p class="sub">In-browser IPA signer &middot; v1.0.0</p>
+	<p class="sub">In-browser IPA signer &middot; v1.1.0</p>
 
 	<div class="privacy">
-		🔒 Your certificate, password, and app are processed entirely inside this
-		browser tab using WebAssembly. Nothing is uploaded to any server, and
-		everything is wiped from memory when signing finishes or you close the tab.
+		🔒 Your certificate, password, and app are signed entirely inside this
+		browser tab (WebAssembly) — they are never uploaded anywhere. The GitHub
+		token you provide is used only for the publish calls below, kept in memory,
+		and cleared as soon as publishing (or cleanup) finishes.
 	</div>
 
+	<div class="section-title">Signing</div>
 	<label>Certificate (.p12)</label>
 	<input type="file" id="p12" accept=".p12">
 
@@ -100,6 +103,17 @@
 
 	<label>App to sign (.ipa)</label>
 	<input type="file" id="ipa" accept=".ipa">
+
+	<div class="section-title">Publish &amp; install (your own repo)</div>
+	<label>GitHub token (contents: read/write, this repo only)</label>
+	<input type="password" id="token" placeholder="github_pat_… (optional — leave blank to just download)" autocomplete="off">
+	<p class="hint">Use a fine-grained token scoped to just your hosting repo with Contents read/write. It stays in this tab only. Leave blank to skip publishing and just download the signed IPA.</p>
+
+	<label>Repo (owner/name)</label>
+	<input type="text" id="repo" value="sms2anhadbir-dev/GOAT-Sign">
+
+	<label>Branch</label>
+	<input type="text" id="branch" value="main">
 
 	<button id="go">Sign</button>
 
@@ -119,6 +133,52 @@ async function readFile(input) {
 	return { name: f.name, data: new Uint8Array(await f.arrayBuffer()) };
 }
 
+// base64-encode a Uint8Array in chunks (avoids call-stack limits on big arrays).
+function toBase64(bytes) {
+	let binary = '';
+	const chunk = 0x8000;
+	for (let i = 0; i < bytes.length; i += chunk) {
+		binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+	}
+	return btoa(binary);
+}
+
+// GitHub contents API helpers. `token` lives only in these calls.
+async function ghPut(repo, branch, token, path, contentBytes, message) {
+	const res = await fetch(`https://api.github.com/repos/${repo}/contents/${path}`, {
+		method: 'PUT',
+		headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+		body: JSON.stringify({ message, branch, content: toBase64(contentBytes) }),
+	});
+	if (!res.ok) throw new Error(`GitHub upload failed (${res.status}): ${(await res.text()).slice(0, 200)}`);
+	const j = await res.json();
+	return { downloadUrl: j.content.download_url, sha: j.content.sha, path };
+}
+async function ghDelete(repo, branch, token, path, sha, message) {
+	const res = await fetch(`https://api.github.com/repos/${repo}/contents/${path}`, {
+		method: 'DELETE',
+		headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+		body: JSON.stringify({ message, branch, sha }),
+	});
+	if (!res.ok) throw new Error(`GitHub delete failed (${res.status})`);
+}
+
+function manifestPlist(ipaUrl, bundleId, version, title) {
+	return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>items</key><array><dict>
+<key>assets</key><array><dict>
+<key>kind</key><string>software-package</string>
+<key>url</key><string>${ipaUrl}</string>
+</dict></array>
+<key>metadata</key><dict>
+<key>bundle-identifier</key><string>${bundleId}</string>
+<key>bundle-version</key><string>${version}</string>
+<key>kind</key><string>software</string>
+<key>title</key><string>${title}</string>
+</dict></dict></array></dict></plist>`;
+}
+
 document.getElementById('go').addEventListener('click', async () => {
 	const btn = document.getElementById('go');
 	logEl.textContent = '';
@@ -128,62 +188,103 @@ document.getElementById('go').addEventListener('click', async () => {
 	const prov = await readFile(document.getElementById('prov'));
 	const ipa = await readFile(document.getElementById('ipa'));
 	const pw = document.getElementById('pw').value;
+	let token = document.getElementById('token').value.trim();
+	const repo = document.getElementById('repo').value.trim();
+	const branch = document.getElementById('branch').value.trim();
 
 	if (!p12 || !prov || !ipa) { log('Please select a .p12, .mobileprovision, and .ipa.'); return; }
 
 	btn.disabled = true;
 	log('Loading signer…');
 
-	let mod;
+	let mod, signed = null;
 	try {
 		mod = await ZsignModule({ print: log, printErr: log, noInitialRun: true });
-
-		// Write inputs into the in-memory virtual filesystem.
 		mod.FS.writeFile('/cert.p12', p12.data);
 		mod.FS.writeFile('/prof.mobileprovision', prov.data);
 		mod.FS.writeFile('/in.ipa', ipa.data);
 
 		log('Signing…');
-		let code = 0;
 		try {
 			mod.callMain(['-k', '/cert.p12', '-p', pw, '-m', '/prof.mobileprovision',
 			              '-o', '/out.ipa', '/in.ipa']);
-		} catch (e) {
-			if (e && typeof e.status === 'number') code = e.status;
-			else throw e;
-		}
+		} catch (e) { if (!(e && typeof e.status === 'number')) throw e; }
 
-		let out;
-		try { out = mod.FS.readFile('/out.ipa'); }
-		catch { out = null; }
-
-		if (!out || out.length === 0) {
-			log('\nSigning failed — check the certificate, password, and profile above.');
-		} else {
-			const blob = new Blob([out], { type: 'application/octet-stream' });
-			const url = URL.createObjectURL(blob);
-			const base = ipa.name.replace(/\.ipa$/i, '');
-			const a = document.createElement('a');
-			a.href = url;
-			a.download = base + '-signed.ipa';
-			a.className = 'download';
-			a.textContent = 'Download signed IPA';
-			resultEl.appendChild(a);
-			log('\nDone. Signed IPA ready (' + (out.length / 1048576).toFixed(1) + ' MB).');
-		}
+		try { signed = mod.FS.readFile('/out.ipa'); } catch { signed = null; }
+		if (!signed || signed.length === 0) { log('\nSigning failed — check the cert, password, and profile.'); return; }
+		log(`\nSigned OK (${(signed.length / 1048576).toFixed(1)} MB).`);
 	} catch (err) {
 		log('\nError: ' + (err && err.message ? err.message : err));
+		return;
 	} finally {
-		// Wipe every trace of the cert/app from the virtual FS and memory.
-		if (mod && mod.FS) {
-			for (const p of ['/cert.p12', '/prof.mobileprovision', '/in.ipa', '/out.ipa']) {
-				try { mod.FS.unlink(p); } catch {}
-			}
-		}
+		if (mod && mod.FS) for (const p of ['/cert.p12','/prof.mobileprovision','/in.ipa','/out.ipa']) { try { mod.FS.unlink(p); } catch {} }
 		mod = null;
 		document.getElementById('pw').value = '';
 		document.getElementById('p12').value = '';
 		document.getElementById('prov').value = '';
+	}
+
+	// Always offer a plain download.
+	const blob = new Blob([signed], { type: 'application/octet-stream' });
+	const dlUrl = URL.createObjectURL(blob);
+	const base = ipa.name.replace(/\.ipa$/i, '');
+	const dl = document.createElement('a');
+	dl.href = dlUrl; dl.download = base + '-signed.ipa'; dl.className = 'download';
+	dl.textContent = 'Download signed IPA';
+	resultEl.appendChild(dl);
+
+	if (!token) { btn.disabled = false; return; }
+
+	// Publish to the user's own repo, build a manifest, offer OTA install + cleanup.
+	try {
+		const ts = Date.now();
+		const ipaPath = `signed/${base}-${ts}.ipa`;
+		const manPath = `signed/manifest-${ts}.plist`;
+
+		log('\nUploading signed IPA to your repo…');
+		const up = await ghPut(repo, branch, token, ipaPath, signed, 'Publish signed IPA (auto)');
+
+		log('Building + uploading manifest…');
+		const manBytes = new TextEncoder().encode(manifestPlist(up.downloadUrl, 'com.goat.sign', '1.1.0', 'GOAT Sign'));
+		const man = await ghPut(repo, branch, token, manPath, manBytes, 'Publish OTA manifest (auto)');
+
+		token = null; // done with the token — drop it.
+		document.getElementById('token').value = '';
+
+		const install = document.createElement('a');
+		install.href = `itms-services://?action=download-manifest&url=${encodeURIComponent(man.downloadUrl)}`;
+		install.className = 'install';
+		install.textContent = 'Install on this device';
+		resultEl.appendChild(install);
+
+		const cleanup = document.createElement('button');
+		cleanup.className = 'cleanup';
+		cleanup.textContent = 'Done installing — delete hosted files';
+		resultEl.appendChild(cleanup);
+
+		let cleaned = false;
+		const doCleanup = async (tok) => {
+			if (cleaned) return; cleaned = true;
+			try {
+				log('\nDeleting hosted IPA + manifest…');
+				await ghDelete(repo, branch, tok, ipaPath, up.sha, 'Remove signed IPA (auto)');
+				await ghDelete(repo, branch, tok, manPath, man.sha, 'Remove manifest (auto)');
+				log('Cleaned up. Nothing left hosted.');
+			} catch (e) { log('Cleanup error: ' + e.message); }
+		};
+
+		// Cleanup needs the token again — ask for it at cleanup time so we don't
+		// hold it in memory in the meantime.
+		cleanup.addEventListener('click', async () => {
+			const t = prompt('Re-enter your GitHub token to delete the hosted files:');
+			if (t) await doCleanup(t.trim());
+		});
+
+		log('\nPublished. Tap “Install on this device”, and once the app finishes installing, tap the red button to delete the hosted files.');
+	} catch (err) {
+		token = null;
+		log('\nPublish error: ' + (err && err.message ? err.message : err));
+	} finally {
 		btn.disabled = false;
 	}
 });
