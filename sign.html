@@ -101,8 +101,7 @@
 	<label>Provisioning Profile (.mobileprovision)</label>
 	<input type="file" id="prov" accept=".mobileprovision">
 
-	<label>App to sign (.ipa)</label>
-	<input type="file" id="ipa" accept=".ipa">
+	<p class="hint">Signs <code>GOATSign-unsigned.ipa</code> straight from this repo — no need to upload it.</p>
 
 	<div class="section-title">Publish &amp; install (your own repo)</div>
 	<label>GitHub token (contents: read/write, this repo only)</label>
@@ -179,6 +178,8 @@ function manifestPlist(ipaUrl, bundleId, version, title) {
 </dict></dict></array></dict></plist>`;
 }
 
+const REPO_IPA_URL = 'https://raw.githubusercontent.com/sms2anhadbir-dev/GOAT-Sign/main/GOATSign-unsigned.ipa';
+
 document.getElementById('go').addEventListener('click', async () => {
 	const btn = document.getElementById('go');
 	logEl.textContent = '';
@@ -186,15 +187,28 @@ document.getElementById('go').addEventListener('click', async () => {
 
 	const p12 = await readFile(document.getElementById('p12'));
 	const prov = await readFile(document.getElementById('prov'));
-	const ipa = await readFile(document.getElementById('ipa'));
 	const pw = document.getElementById('pw').value;
 	let token = document.getElementById('token').value.trim();
 	const repo = document.getElementById('repo').value.trim();
 	const branch = document.getElementById('branch').value.trim();
 
-	if (!p12 || !prov || !ipa) { log('Please select a .p12, .mobileprovision, and .ipa.'); return; }
+	if (!p12 || !prov) { log('Please select a .p12 and .mobileprovision.'); return; }
 
 	btn.disabled = true;
+	log('Fetching GOATSign-unsigned.ipa from the repo…');
+
+	let ipaBytes;
+	try {
+		const res = await fetch(REPO_IPA_URL, { cache: 'no-store' });
+		if (!res.ok) throw new Error(`Fetch failed (${res.status})`);
+		ipaBytes = new Uint8Array(await res.arrayBuffer());
+	} catch (err) {
+		log('Failed to fetch unsigned IPA: ' + (err.message || err));
+		btn.disabled = false;
+		return;
+	}
+	const ipa = { name: 'GOATSign-unsigned.ipa' };
+
 	log('Loading signer…');
 
 	let mod, signed = null;
@@ -202,7 +216,7 @@ document.getElementById('go').addEventListener('click', async () => {
 		mod = await ZsignModule({ print: log, printErr: log, noInitialRun: true });
 		mod.FS.writeFile('/cert.p12', p12.data);
 		mod.FS.writeFile('/prof.mobileprovision', prov.data);
-		mod.FS.writeFile('/in.ipa', ipa.data);
+		mod.FS.writeFile('/in.ipa', ipaBytes);
 
 		log('Signing…');
 		try {
